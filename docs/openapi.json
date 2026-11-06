@@ -1825,13 +1825,24 @@
     "/api/orders": {
       "post": {
         "summary": "Create an atomic multi-item order",
-        "description": "",
+        "description": "Both creation and replay return 201 and the same order ID. Replay returns the current order representation, not cached bytes; no stock changes. Without a key, retries create independent orders.",
         "security": [
           {
             "bearerAuth": []
           }
         ],
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,128}$"
+            },
+            "description": "Optional, case-sensitive, scoped to the authenticated user and retained with the order. Reuse for retries of the same items (item order and UUID case are ignored). Different payload returns 409 IDEMPOTENCY_CONFLICT. Failed transactions do not consume the key."
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2505,7 +2516,7 @@
     "/api/reports/revenue": {
       "get": {
         "summary": "revenue report (admin)",
-        "description": "Revenue/units include DELIVERED orders only; time ranges use order creation. Low-stock is a current snapshot.",
+        "description": "Revenue/units use DELIVERED orders and delivered_at (UTC months). Order counts use created_at. Customer history revenue uses delivered_at; order_count/last_order_at use created_at. Low-stock is a current snapshot.",
         "security": [
           {
             "bearerAuth": []
@@ -2519,7 +2530,7 @@
               "type": "string",
               "format": "date-time"
             },
-            "description": "Inclusive order creation time, with timezone"
+            "description": "Inclusive delivery time, with timezone"
           },
           {
             "name": "to",
@@ -2528,7 +2539,7 @@
               "type": "string",
               "format": "date-time"
             },
-            "description": "Exclusive order creation time, with timezone"
+            "description": "Exclusive delivery time, with timezone"
           },
           {
             "name": "limit",
@@ -2631,7 +2642,7 @@
     "/api/reports/top-products": {
       "get": {
         "summary": "top-products report (admin)",
-        "description": "Revenue/units include DELIVERED orders only; time ranges use order creation. Low-stock is a current snapshot.",
+        "description": "Revenue/units use DELIVERED orders and delivered_at (UTC months). Order counts use created_at. Customer history revenue uses delivered_at; order_count/last_order_at use created_at. Low-stock is a current snapshot.",
         "security": [
           {
             "bearerAuth": []
@@ -2645,7 +2656,7 @@
               "type": "string",
               "format": "date-time"
             },
-            "description": "Inclusive order creation time, with timezone"
+            "description": "Inclusive delivery time, with timezone"
           },
           {
             "name": "to",
@@ -2654,7 +2665,7 @@
               "type": "string",
               "format": "date-time"
             },
-            "description": "Exclusive order creation time, with timezone"
+            "description": "Exclusive delivery time, with timezone"
           },
           {
             "name": "limit",
@@ -2757,7 +2768,7 @@
     "/api/reports/order-counts": {
       "get": {
         "summary": "order-counts report (admin)",
-        "description": "Revenue/units include DELIVERED orders only; time ranges use order creation. Low-stock is a current snapshot.",
+        "description": "Revenue/units use DELIVERED orders and delivered_at (UTC months). Order counts use created_at. Customer history revenue uses delivered_at; order_count/last_order_at use created_at. Low-stock is a current snapshot.",
         "security": [
           {
             "bearerAuth": []
@@ -2883,7 +2894,7 @@
     "/api/reports/monthly-sales": {
       "get": {
         "summary": "monthly-sales report (admin)",
-        "description": "Revenue/units include DELIVERED orders only; time ranges use order creation. Low-stock is a current snapshot.",
+        "description": "Revenue/units use DELIVERED orders and delivered_at (UTC months). Order counts use created_at. Customer history revenue uses delivered_at; order_count/last_order_at use created_at. Low-stock is a current snapshot.",
         "security": [
           {
             "bearerAuth": []
@@ -2897,7 +2908,7 @@
               "type": "string",
               "format": "date-time"
             },
-            "description": "Inclusive order creation time, with timezone"
+            "description": "Inclusive delivery time, with timezone"
           },
           {
             "name": "to",
@@ -2906,7 +2917,7 @@
               "type": "string",
               "format": "date-time"
             },
-            "description": "Exclusive order creation time, with timezone"
+            "description": "Exclusive delivery time, with timezone"
           },
           {
             "name": "limit",
@@ -3009,7 +3020,7 @@
     "/api/reports/low-stock": {
       "get": {
         "summary": "low-stock report (admin)",
-        "description": "Revenue/units include DELIVERED orders only; time ranges use order creation. Low-stock is a current snapshot.",
+        "description": "Revenue/units use DELIVERED orders and delivered_at (UTC months). Order counts use created_at. Customer history revenue uses delivered_at; order_count/last_order_at use created_at. Low-stock is a current snapshot.",
         "security": [
           {
             "bearerAuth": []
@@ -3127,7 +3138,7 @@
     "/api/reports/customer-history": {
       "get": {
         "summary": "customer-history report (admin)",
-        "description": "Revenue/units include DELIVERED orders only; time ranges use order creation. Low-stock is a current snapshot.",
+        "description": "Revenue/units use DELIVERED orders and delivered_at (UTC months). Order counts use created_at. Customer history revenue uses delivered_at; order_count/last_order_at use created_at. Low-stock is a current snapshot.",
         "security": [
           {
             "bearerAuth": []
@@ -3141,7 +3152,7 @@
               "type": "string",
               "format": "date-time"
             },
-            "description": "Inclusive order creation time, with timezone"
+            "description": "Inclusive delivery time for revenue; creation time for order count and last order, with timezone"
           },
           {
             "name": "to",
@@ -3150,7 +3161,7 @@
               "type": "string",
               "format": "date-time"
             },
-            "description": "Exclusive order creation time, with timezone"
+            "description": "Exclusive delivery time for revenue; creation time for order count and last order, with timezone"
           },
           {
             "name": "limit",
@@ -3742,6 +3753,16 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "delivered_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Delivery event time; null until delivered."
+          },
+          "delivered_at_estimated": {
+            "type": "boolean",
+            "description": "True only for legacy delivery dates inferred from updated_at."
           },
           "items": {
             "type": "array",

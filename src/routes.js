@@ -127,7 +127,11 @@ routes.use('/orders', authenticate);
 routes.post(
   '/orders',
   body(v.orderSchema),
-  respond((r) => orderService.create(r.validated.body.items, r.user), 201),
+  (req, _res, next) => {
+    req.idempotencyKey = v.idempotencyKey.parse(req.get('Idempotency-Key'));
+    next();
+  },
+  respond((r) => orderService.create(r.validated.body.items, r.user, r.idempotencyKey), 201),
 );
 routes.get(
   '/orders',

@@ -82,7 +82,7 @@ Compose defaults to development for HTTP testing. For production set `NODE_ENV=p
 
 ## API reference
 
-All API routes start with `/api`. Use `Authorization: Bearer <accessToken>` for protected routes. Strict schemas reject unknown request fields. UUIDs are required for IDs. Update routes use full-resource `PUT`, not partial `PATCH`, except order status. All timestamps are ISO 8601 instants with timezone. Date ranges are **from inclusive, to exclusive**, based on order creation time.
+All API routes start with `/api`. Use `Authorization: Bearer <accessToken>` for protected routes. Strict schemas reject unknown request fields. UUIDs are required for IDs. Update routes use full-resource `PUT`, not partial `PATCH`, except order status. All timestamps are ISO 8601 instants with timezone. Date ranges are **from inclusive, to exclusive**, using the event dates documented below.
 
 | Method       | Path                             | Access            | Purpose                                                      |
 | ------------ | -------------------------------- | ----------------- | ------------------------------------------------------------ |
@@ -195,13 +195,13 @@ Order creation validates at most 100 distinct product lines, locks product rows 
 
 Cancellation locks the order first, checks owner and state, then locks all products in ascending UUID order, restores stock and appends status history in the same transaction. Repeated/concurrent cancellation returns 409 after the first succeeds; a uniqueness constraint also prevents duplicate restoration movements. Stock adjustments lock products and record audit movements transactionally. There is a maximum stock of 1,000,000; if restocking leaves insufficient capacity to restore cancelled items, cancellation fails atomically and an admin must first adjust stock.
 
-Product price/deactivation updates also acquire PostgreSQL row locks through UPDATE. Category activation is checked at order creation's statement snapshot; a concurrent category deactivation may complete while an already-started purchase proceeds. This is an intentional catalog-visibility policy, not an inventory reservation. No network calls happen inside stock transactions. Deadlocks are reduced by lock order; lock/statement timeouts still produce retryable server errors. Order POST has no idempotency key: clients must not blindly retry after an uncertain network result.
+Product price/deactivation updates also acquire PostgreSQL row locks through UPDATE. Category activation is checked at order creation's statement snapshot; a concurrent category deactivation may complete while an already-started purchase proceeds. This is an intentional catalog-visibility policy, not an inventory reservation. No network calls happen inside stock transactions. Deadlocks are reduced by lock order; lock/statement timeouts still produce retryable server errors. Clients can safely retry order creation with the same Idempotency-Key and items (see below).
 
 ## SQL reports and query plans
 
 Examples: `/api/reports/revenue?from=2026-01-01T00:00:00Z&to=2027-01-01T00:00:00Z`, `/api/reports/top-products?limit=5`, `/api/reports/low-stock?threshold=10`.
 
-Only delivered orders contribute revenue and sales units. Revenue is attributed to order **creation** date, not delivery date. Monthly comparisons use the previous month with sales, not necessarily the previous calendar month; missing months are not zero-filled. Reports exclude taxes, shipping, refunds and payment settlement. `npm run explain` executes real `EXPLAIN (ANALYZE, BUFFERS)` read queries. See [SQL.md](docs/SQL.md) and the recorded [plans](docs/EXPLAIN.txt); a tiny seed dataset cannot establish production throughput or justify removing indexes.
+Only delivered orders contribute revenue and sales units. Revenue and delivered-product sales use **delivered_at**, not order creation time. Monthly grouping uses UTC delivery months. Monthly comparisons use the previous month with sales, not necessarily the previous calendar month; missing months are not zero-filled. Reports exclude taxes, shipping, refunds and payment settlement. `npm run explain` executes real `EXPLAIN (ANALYZE, BUFFERS)` read queries. See [SQL.md](docs/SQL.md) and the recorded [plans](docs/EXPLAIN.txt); a tiny seed dataset cannot establish production throughput or justify removing indexes.
 
 ## Tests and CI
 
@@ -221,6 +221,30 @@ GitHub Actions provisions PostgreSQL 17, installs the exact lockfile, migrates, 
 
 ## Scope and future improvements
 
-This is production-minded, not production-certified. Add real payments/refunds, fulfillment addresses, multi-currency, idempotency keys, email verification/reset, explicit admin provisioning, a shared rate-limit store, expiry cleanup, managed secrets, deployment automation, observability and backups before public operation. Offset pagination can drift during writes; use keyset pagination for large datasets. Count/page queries are separate snapshots. Substring ILIKE is fine for this small catalog; use pg_trgm/full-text search with measured demand. Database schema prevents invalid row values, while application transactions enforce cross-row totals and lifecycle rules; direct operator SQL can bypass those service invariants. Do not grant application users direct database access.
+This is production-minded, not production-certified. Add real payments/refunds, fulfillment addresses, multi-currency, email verification/reset, explicit admin provisioning, a shared rate-limit store, expiry cleanup, managed secrets, deployment automation, observability and backups before public operation. Offset pagination can drift during writes; use keyset pagination for large datasets. Count/page queries are separate snapshots. Substring ILIKE is fine for this small catalog; use pg_trgm/full-text search with measured demand. Database schema prevents invalid row values, while application transactions enforce cross-row totals and lifecycle rules; direct operator SQL can bypass those service invariants. Do not grant application users direct database access.
 
 See [LEARNING_GUIDE.md](LEARNING_GUIDE.md) for interview explanations and tradeoffs.
+
+## Delivery dates and historical compatibility
+
+Migration `002_delivery_and_idempotency.sql` adds `delivered_at` and `delivered_at_estimated`. A successful SHIPPED → DELIVERED transaction records the server statement timestamp; other states have no delivery timestamp. Sales reports (`revenue`, `top-products`, `monthly-sales`) filter delivery time. An order created in January and delivered in February counts toward February sales. Half-open `[from,to)` ranges remain unchanged.
+
+Order lists, customer purchase lists and `order-counts` still measure **creation activity** using `created_at`. `customer-history` intentionally has two measures: `order_count`/`last_order_at` use creation dates, while `lifetime_revenue_cents` uses delivery dates (despite the legacy field name, supplied dates restrict that revenue). Customers with zero matching orders remain included. Low-stock remains a current snapshot. Monthly comparisons still compare active delivery months, without zero-filling gaps.
+
+For existing delivered orders the migration takes the latest valid timezone-qualified DELIVERED history timestamp. Missing or malformed history falls back to `updated_at` and sets `delivered_at_estimated=true`; that is an explicit estimate, not recovered historical truth. Reports include these estimated deliveries so existing revenue is not dropped. Non-delivered rows stay null. Operators may reconcile estimates with trustworthy external records and clear the flag. Existing history is retained. New database constraints enforce delivery/state consistency and a partial delivery-date index supports sales queries.
+
+Apply migrations before starting the new application. Pause delivery transitions during rollout: old application versions cannot populate the newly required delivery timestamp. This is not a zero-downtime rolling migration. Migration backfills and index creation take locks; schedule appropriately for large databases and take a backup. Migration 001 is unchanged; no down migration is provided.
+
+## Order creation idempotency
+
+Send `Idempotency-Key: <unique-key>` with `POST /api/orders`. The header is optional for compatibility; clients that need retry safety must supply it on the original request and every retry. Keys are case-sensitive, 1–128 ASCII letters/digits/`.`/`_`/`-`; use a fresh UUID for each intended purchase. Missing keys preserve independent-order behavior; invalid keys return 400.
+
+The key is scoped to the authenticated user, so another customer's identical key cannot expose or reuse your order. The service hashes canonical validated items (sorted by normalized product UUID and quantity). Reordered items/UUID casing are equivalent; changing quantities or products with a used key returns **409 IDEMPOTENCY_CONFLICT**. Unknown fields and duplicate items remain invalid.
+
+A transaction-scoped PostgreSQL advisory lock serializes same-user/key requests before product locks, across API instances. After acquiring it, the service checks the previous committed order, then either replays it or creates the order/stock movements in the same transaction. A unique `(user_id,idempotency_key)` partial index is a second defense. Hash collisions in advisory-lock identity only serialize unrelated requests; exact key/user lookup still decides identity. Failed transactions consume no key. A timeout can be retried with the same key; the committed order, if any, will be found.
+
+First success and successful replays return **201**, the same order ID and original line prices. Replays return the order's **current state**, rather than an immutable cached HTTP response. A cancelled order stays cancelled on retry and stock is not deducted again; use a new key for a new purchase. Keys/hashes are internal and omitted from order responses. Keys are retained for the order's lifetime (no expiry or cleanup); do not put secrets or personal data in them. No additional table or dependency is needed.
+
+## Repository default branch
+
+The read-only remote HEAD check during this review reported `feature/order-management-api` as default, even though `main` now contains merged work. No repository settings were changed. To switch it on your iPhone: open the repository in Safari → **Settings → General → Default branch → edit → main → Update**. If the controls are hidden, Safari's page menu → **Request Desktop Website** may help. Repository admin permission is required. Set branch protection separately if desired; this change does not merge any pull request.

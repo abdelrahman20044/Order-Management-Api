@@ -1,4 +1,22 @@
-# Verification record
+# Sales dates and order idempotency verification
+
+Validated on 6 November 2026 on `feature/sales-dates-order-idempotency`, based on merged main `bb4c911`.
+
+- PostgreSQL 17 integration suites: **30 passed, 0 failed, 0 skipped** on Node 22 and Node 24.
+- Coverage: 97.14% statements, 92.9% branches, 98.91% functions, 97.97% lines (excluding server entry point).
+- ESLint, Prettier check and OpenAPI validation passed.
+- Migration 002 applied to existing test/development databases; repeated migration skipped safely. The migration test also builds schema 001 in an isolated PostgreSQL schema, inserts legacy delivered/pending orders, applies 002, and checks exact history, missing/malformed history fallback, delivery-state constraints and null legacy keys.
+- Cross-month tests verify delivery-based revenue, monthly sales, top products and customer revenue, while order counts/lists remain creation-based.
+- Idempotency tests cover concurrent identical/conflicting payloads, user isolation, reordered/case-normalized items, replay after cancellation/catalog changes, invalid keys, absent/distinct keys, and retry after both pre-write failure and injected post-write failure.
+- EXPLAIN.txt was regenerated using actual delivery-based queries on the seeded development database. This is not a production performance benchmark.
+- Read-only `git ls-remote --symref origin HEAD` reported **feature/order-management-api** as the repository default branch. Settings were not modified. README contains iPhone instructions for selecting main.
+- GitHub API access still returns Forbidden (403). Remote Actions status and automated PR creation cannot be verified through that API; final chat reports the feature push and PR outcome. The green CI screenshot from the previous implementation is not evidence for this new branch.
+
+Rollout: migrate before starting the new application and pause delivery transitions until all writers use the new code. Legacy fallback dates are flagged estimates. Idempotency is optional, per user, retained for the order lifetime, and returns current order state with HTTP 201 on replay. No new dependencies or application tables were added. No repository settings, merge, deployment or environment publication was performed for this change.
+
+---
+
+# Original implementation verification record
 
 Executed in the managed cloud environment on 6 November 2026. No public deployment or environment publication was performed for this implementation.
 

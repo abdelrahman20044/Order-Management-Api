@@ -315,7 +315,13 @@ describe('transactional orders', () => {
       'CREATE TRIGGER test_sale_failure BEFORE INSERT ON inventory_movements FOR EACH ROW EXECUTE FUNCTION test_fail_sale()',
     );
     try {
-      expect((await buy()).status).toBe(500);
+      expect(
+        (
+          await api('post', '/orders')
+            .set('Idempotency-Key', 'late-failure')
+            .send({ items: [{ product_id: product.id, quantity: 1 }] })
+        ).status,
+      ).toBe(500);
       expect(await stock(product.id)).toBe(5);
       expect(await count('orders')).toBe(0);
       expect(await count('order_items')).toBe(0);
@@ -325,6 +331,12 @@ describe('transactional orders', () => {
         'DROP TRIGGER test_sale_failure ON inventory_movements; DROP FUNCTION test_fail_sale()',
       );
     }
+    const retry = await api('post', '/orders')
+      .set('Idempotency-Key', 'late-failure')
+      .send({ items: [{ product_id: product.id, quantity: 1 }] });
+    expect(retry.status).toBe(201);
+    expect(await count('orders')).toBe(1);
+    expect(await stock(product.id)).toBe(4);
   });
   test('concurrent last-unit purchases cannot oversell', async () => {
     await pool.query('UPDATE products SET stock=1 WHERE id=$1', [product.id]);
@@ -457,8 +469,8 @@ describe('report date boundaries and rate limiting', () => {
         expect((await api('patch', `/orders/${id}/status`, 'admin').send({ status })).status).toBe(
           200,
         );
-    await pool.query("UPDATE orders SET created_at='2025-01-01T00:00:00Z' WHERE id=$1", [a.id]);
-    await pool.query("UPDATE orders SET created_at='2025-02-01T00:00:00Z' WHERE id=$1", [b.id]);
+    await pool.query("UPDATE orders SET delivered_at='2025-01-01T00:00:00Z' WHERE id=$1", [a.id]);
+    await pool.query("UPDATE orders SET delivered_at='2025-02-01T00:00:00Z' WHERE id=$1", [b.id]);
     const months = (await api('get', '/reports/monthly-sales', 'admin')).body;
     expect(months).toHaveLength(2);
     expect(months[1].change_from_previous_active_month_cents).toBe('2500');
@@ -480,5 +492,116 @@ describe('report date boundaries and rate limiting', () => {
       expect(r.status).toBe(401);
     }
     expect(limited).toBe(true);
+  });
+});
+describe('order creation idempotency', () => {
+  const send = (key, items = [{ product_id: product.id, quantity: 1 }], role = 'customer') =>
+    api('post', '/orders', role).set('Idempotency-Key', key).send({ items });
+  test('retries return one order without rechecking changed stock/prices; metadata stays private', async () => {
+    const a = await send('retry-1');
+    expect(a.status).toBe(201);
+    await pool.query('UPDATE products SET stock=0,price_cents=9000 WHERE id=$1', [product.id]);
+    const b = await send('retry-1');
+    expect(b.status).toBe(201);
+    expect(b.body).toEqual(a.body);
+    expect(b.body.request_hash).toBeUndefined();
+    expect(b.body.idempotency_key).toBeUndefined();
+    const list = await api('get', '/orders');
+    expect(list.body.data[0].request_hash).toBeUndefined();
+    expect(await count('orders')).toBe(1);
+    expect(await count('inventory_movements')).toBe(1);
+  });
+  test('concurrent identical retries create exactly one order and stock deduction', async () => {
+    const r = await Promise.all(Array.from({ length: 5 }, () => send('concurrent')));
+    expect(r.map((r) => r.status)).toEqual([201, 201, 201, 201, 201]);
+    expect(new Set(r.map((r) => r.body.id)).size).toBe(1);
+    expect(await stock(product.id)).toBe(4);
+    expect(await count('order_items')).toBe(1);
+    expect(await count('inventory_movements')).toBe(1);
+  });
+  test('same key with changed quantity/products conflicts, including concurrent requests', async () => {
+    const r = await Promise.all([
+      send('conflict'),
+      send('conflict', [{ product_id: product.id, quantity: 2 }]),
+    ]);
+    expect(r.map((r) => r.status).sort()).toEqual([201, 409]);
+    expect(r.find((r) => r.status === 409).body.error.code).toBe('IDEMPOTENCY_CONFLICT');
+    expect((await send('conflict', [{ product_id: second.id, quantity: 1 }])).status).toBe(409);
+    expect(await count('orders')).toBe(1);
+  });
+  test('keys are scoped to customers and distinct keys/no key create independent orders', async () => {
+    const a = await send('shared'),
+      b = await send('shared', undefined, 'other');
+    expect(a.body.id).not.toBe(b.body.id);
+    expect(b.body.user_id).toBe(ids.other);
+    expect((await send('different')).status).toBe(201);
+    expect((await buy()).status).toBe(201);
+    expect((await buy()).status).toBe(201);
+    expect(await count('orders')).toBe(5);
+  });
+  test('item ordering and UUID casing do not change canonical payload; cancellation is not a new purchase', async () => {
+    const items = [
+      { product_id: product.id, quantity: 1 },
+      { product_id: second.id, quantity: 2 },
+    ];
+    const a = await send('canonical', items);
+    const b = await send(
+      'canonical',
+      [...items].reverse().map((i) => ({ ...i, product_id: i.product_id.toUpperCase() })),
+    );
+    expect(b.status).toBe(201);
+    expect(b.body.id).toBe(a.body.id);
+    await api('post', `/orders/${a.body.id}/cancel`);
+    const c = await send('canonical', items);
+    expect(c.body.status).toBe('CANCELLED');
+    expect(await stock(product.id)).toBe(5);
+  });
+  test('failed transactions do not consume keys, and invalid keys are rejected', async () => {
+    for (const key of ['', 'bad key', 'a'.repeat(129)]) expect((await send(key)).status).toBe(400);
+    await pool.query('UPDATE products SET stock=0 WHERE id=$1', [product.id]);
+    expect((await send('retry-failed')).status).toBe(409);
+    await pool.query('UPDATE products SET stock=5 WHERE id=$1', [product.id]);
+    expect((await send('retry-failed')).status).toBe(201);
+    expect(await count('orders')).toBe(1);
+  });
+});
+describe('delivery-based sales dates', () => {
+  test('creation and delivery in different months use the correct event in every report', async () => {
+    const o = (await buy()).body;
+    expect(o.delivered_at).toBeNull();
+    await pool.query("UPDATE orders SET created_at='2025-01-10T00:00:00Z' WHERE id=$1", [o.id]);
+    for (const status of ['CONFIRMED', 'SHIPPED', 'DELIVERED']) {
+      const r = await api('patch', `/orders/${o.id}/status`, 'admin').send({ status });
+      expect(r.status).toBe(200);
+      if (status === 'DELIVERED') {
+        expect(r.body.delivered_at).toBeTruthy();
+        expect(r.body.delivered_at_estimated).toBe(false);
+      } else expect(r.body.delivered_at).toBeNull();
+    }
+    await pool.query("UPDATE orders SET delivered_at='2025-02-01T00:00:00Z' WHERE id=$1", [o.id]);
+    const jan = 'from=2025-01-01T00:00:00Z&to=2025-02-01T00:00:00Z',
+      feb = 'from=2025-02-01T00:00:00Z&to=2025-03-01T00:00:00Z';
+    const report = async (name, range) =>
+      (await api('get', `/reports/${name}?${range}`, 'admin')).body;
+    expect((await report('revenue', jan))[0].revenue_cents).toBe('0');
+    expect((await report('revenue', feb))[0].revenue_cents).toBe('2500');
+    expect(await report('monthly-sales', jan)).toHaveLength(0);
+    expect((await report('monthly-sales', feb))[0].revenue_cents).toBe('2500');
+    expect(await report('top-products', jan)).toHaveLength(0);
+    expect((await report('top-products', feb))[0].units).toBe(1);
+    expect(await report('order-counts', jan)).toEqual([{ status: 'DELIVERED', count: 1 }]);
+    expect(await report('order-counts', feb)).toHaveLength(0);
+    const customer = (await report('customer-history', feb)).find((c) => c.id === ids.customer);
+    expect(customer).toMatchObject({
+      order_count: 0,
+      lifetime_revenue_cents: '2500',
+      last_order_at: null,
+    });
+    expect(
+      (await report('customer-history', jan)).find((c) => c.id === ids.customer),
+    ).toMatchObject({ order_count: 1, lifetime_revenue_cents: '0' });
+    expect((await api('get', `/orders?${jan}`)).body.total).toBe(1);
+    expect((await api('get', `/orders?${feb}`)).body.total).toBe(0);
+    expect(await report(`customers/${ids.customer}/orders`, jan)).toHaveLength(1);
   });
 });

@@ -66,7 +66,7 @@ INNER JOIN keeps matching rows, appropriate for order items that must have valid
 
 SUM aggregates values; GROUP BY creates product/status/month groups; HAVING filters aggregated groups, while WHERE filters input rows. The sales CTE makes a grouped result readable before `DENSE_RANK()` ranks product units, including ties. Monthly `LAG` compares adjacent active months without collapsing the rows.
 
-Do not join orders to items and then SUM(order.total_cents): a three-item order would be counted three times. Revenue is aggregated directly from orders; product revenue is aggregated from line quantities × snapshot prices. Only DELIVERED counts as revenue here. This is an operational sales definition, not proof of settled payments. Date filters use order creation and half-open `[from,to)` ranges to avoid counting a boundary twice.
+Do not join orders to items and then SUM(order.total_cents): a three-item order would be counted three times. Revenue is aggregated directly from orders; product revenue is aggregated from line quantities × snapshot prices. Only DELIVERED counts as revenue here. This is an operational sales definition, not proof of settled payments. Sales date filters use delivery time; order-activity filters use creation time. Both use half-open `[from,to)` ranges to avoid counting a boundary twice.
 
 ## 9. Authentication versus authorization
 
@@ -91,3 +91,9 @@ Tests are evidence for the scenarios exercised, not a proof of correctness for a
 3. Why store historical prices and represent bigint amounts as strings in JSON?
 4. Why hash refresh tokens differently from passwords, and why commit replay revocation?
 5. Why can a LEFT JOIN report and a naive SUM accidentally inflate counts/revenue?
+
+## Delivery accounting and safe retries
+
+Order creation date measures demand; delivery date measures completed sales. Keeping `delivered_at` separate prevents delayed fulfillment from rewriting the meaning of monthly delivered revenue. Legacy history can recover some delivery dates, but `updated_at` fallback dates are estimates and are flagged. A migration cannot invent missing historical facts.
+
+A client timeout does not tell you whether COMMIT succeeded. Retrying without identity can purchase twice. A user-scoped Idempotency-Key plus canonical payload hash identifies an intended purchase. Acquiring a database transaction advisory lock before looking up the key prevents simultaneous retries from both seeing an absent row. The order and key commit together, so failure rolls back both. A unique index protects storage integrity too. Payload mismatches return 409; a different customer has a separate namespace. This guarantees one committed order per user/key, not exactly-once network delivery. Replays return current order state; caching exact original response bytes would require additional storage and retention policy.
