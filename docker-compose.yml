@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: orders
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: orders
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U orders -d orders']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  migrate:
+    build: .
+    environment:
+      DATABASE_URL: postgres://orders:${POSTGRES_PASSWORD}@db:5432/orders
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+    command: ['npm', 'run', 'migrate']
+    depends_on:
+      db:
+        condition: service_healthy
+  api:
+    build: .
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      DATABASE_URL: postgres://orders:${POSTGRES_PASSWORD}@db:5432/orders
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    ports:
+      - '3000:3000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    init: true
+volumes:
+  pgdata:

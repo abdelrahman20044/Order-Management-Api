@@ -1,0 +1,87 @@
+
+> order-management-api@1.0.0 explain
+> node scripts/explain.js
+
+
+delivered revenue
+Aggregate  (cost=11.30..11.32 rows=1 width=36) (actual time=0.021..0.022 rows=1 loops=1)
+  Buffers: shared hit=2
+  ->  Bitmap Heap Scan on orders  (cost=4.17..11.28 rows=3 width=8) (actual time=0.016..0.016 rows=2 loops=1)
+        Recheck Cond: (status = 'DELIVERED'::text)
+        Heap Blocks: exact=1
+        Buffers: shared hit=2
+        ->  Bitmap Index Scan on orders_status_date_idx  (cost=0.00..4.17 rows=3 width=0) (actual time=0.006..0.006 rows=2 loops=1)
+              Index Cond: (status = 'DELIVERED'::text)
+              Buffers: shared hit=1
+Planning:
+  Buffers: shared hit=90 read=3
+Planning Time: 0.273 ms
+Execution Time: 0.050 ms
+
+top products
+Limit  (cost=24.34..24.38 rows=2 width=378) (actual time=0.079..0.081 rows=2 loops=1)
+  Buffers: shared hit=13
+  ->  Incremental Sort  (cost=24.34..24.38 rows=2 width=378) (actual time=0.078..0.080 rows=2 loops=1)
+        Sort Key: sales.units DESC, sales.id
+        Presorted Key: sales.units
+        Full-sort Groups: 1  Sort Method: quicksort  Average Memory: 25kB  Peak Memory: 25kB
+        Buffers: shared hit=13
+        ->  WindowAgg  (cost=24.31..24.33 rows=1 width=378) (actual time=0.058..0.062 rows=2 loops=1)
+              Buffers: shared hit=7
+              ->  Sort  (cost=24.31..24.31 rows=1 width=370) (actual time=0.052..0.054 rows=2 loops=1)
+                    Sort Key: sales.units DESC
+                    Sort Method: quicksort  Memory: 25kB
+                    Buffers: shared hit=7
+                    ->  Subquery Scan on sales  (cost=24.26..24.30 rows=1 width=370) (actual time=0.045..0.047 rows=2 loops=1)
+                          Buffers: shared hit=7
+                          ->  GroupAggregate  (cost=24.26..24.30 rows=1 width=370) (actual time=0.044..0.046 rows=2 loops=1)
+                                Group Key: p.id
+                                Filter: (sum(i.quantity) > 0)
+                                Buffers: shared hit=7
+                                ->  Sort  (cost=24.26..24.26 rows=1 width=342) (actual time=0.040..0.041 rows=2 loops=1)
+                                      Sort Key: p.id
+                                      Sort Method: quicksort  Memory: 25kB
+                                      Buffers: shared hit=7
+                                      ->  Nested Loop  (cost=11.46..24.25 rows=1 width=342) (actual time=0.030..0.034 rows=2 loops=1)
+                                            Buffers: shared hit=7
+                                            ->  Hash Join  (cost=11.32..23.84 rows=1 width=24) (actual time=0.023..0.025 rows=2 loops=1)
+                                                  Hash Cond: (i.order_id = o.id)
+                                                  Buffers: shared hit=3
+                                                  ->  Seq Scan on order_items i  (cost=0.00..12.00 rows=200 width=40) (actual time=0.005..0.006 rows=4 loops=1)
+                                                        Buffers: shared hit=1
+                                                  ->  Hash  (cost=11.28..11.28 rows=3 width=16) (actual time=0.007..0.007 rows=2 loops=1)
+                                                        Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                                                        Buffers: shared hit=2
+                                                        ->  Bitmap Heap Scan on orders o  (cost=4.17..11.28 rows=3 width=16) (actual time=0.004..0.005 rows=2 loops=1)
+                                                              Recheck Cond: (status = 'DELIVERED'::text)
+                                                              Heap Blocks: exact=1
+                                                              Buffers: shared hit=2
+                                                              ->  Bitmap Index Scan on orders_status_date_idx  (cost=0.00..4.17 rows=3 width=0) (actual time=0.002..0.002 rows=2 loops=1)
+                                                                    Index Cond: (status = 'DELIVERED'::text)
+                                                                    Buffers: shared hit=1
+                                            ->  Index Scan using products_pkey on products p  (cost=0.14..0.40 rows=1 width=334) (actual time=0.003..0.003 rows=1 loops=2)
+                                                  Index Cond: (id = i.product_id)
+                                                  Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=166 read=2
+Planning Time: 0.525 ms
+Execution Time: 0.137 ms
+
+customer order listing
+Limit  (cost=11.31..11.31 rows=3 width=120) (actual time=0.012..0.013 rows=2 loops=1)
+  Buffers: shared hit=5
+  ->  Sort  (cost=11.31..11.31 rows=3 width=120) (actual time=0.012..0.012 rows=2 loops=1)
+        Sort Key: created_at DESC, id
+        Sort Method: quicksort  Memory: 26kB
+        Buffers: shared hit=5
+        ->  Bitmap Heap Scan on orders  (cost=4.17..11.28 rows=3 width=120) (actual time=0.004..0.005 rows=2 loops=1)
+              Recheck Cond: (user_id = 'c0bd6dcf-8096-4e9d-9f4d-39500e147e43'::uuid)
+              Heap Blocks: exact=1
+              Buffers: shared hit=2
+              ->  Bitmap Index Scan on orders_user_date_idx  (cost=0.00..4.17 rows=3 width=0) (actual time=0.002..0.002 rows=6 loops=1)
+                    Index Cond: (user_id = 'c0bd6dcf-8096-4e9d-9f4d-39500e147e43'::uuid)
+                    Buffers: shared hit=1
+Planning:
+  Buffers: shared hit=5
+Planning Time: 0.036 ms
+Execution Time: 0.020 ms
