@@ -4,6 +4,9 @@ export function authorize(order, user) {
   if (user.role !== 'admin' && order.user_id !== user.id)
     throw new AppError(404, 'Order not found', 'NOT_FOUND');
 }
+function publicOrder({ idempotency_key: _key, request_hash: _hash, ...order }) {
+  return order;
+}
 export async function get(id, user, db = pool) {
   const order = requireFound(
     (await db.query('SELECT * FROM orders WHERE id=$1', [id])).rows[0],
@@ -16,7 +19,7 @@ export async function get(id, user, db = pool) {
       [id],
     )
   ).rows;
-  return { ...order, items };
+  return { ...publicOrder(order), items };
 }
 export async function list(q, user) {
   const values = [
@@ -36,5 +39,5 @@ export async function list(q, user) {
       [...values, q.limit, (q.page - 1) * q.limit],
     )
   ).rows;
-  return { data, total, page: q.page, limit: q.limit };
+  return { data: data.map(publicOrder), total, page: q.page, limit: q.limit };
 }

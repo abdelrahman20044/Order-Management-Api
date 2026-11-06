@@ -1,5 +1,5 @@
 import { z } from 'zod';
-export const uuid = z.uuid();
+export const uuid = z.uuid().transform((value) => value.toLowerCase());
 export const idParams = z.object({ id: uuid }).strict();
 const password = z
   .string()
@@ -88,3 +88,8 @@ export const validate =
     req.validated[part] = schema.parse(req[part]);
     next();
   };
+
+export const idempotencyKey = z
+  .string()
+  .regex(/^[A-Za-z0-9._-]{1,128}$/)
+  .optional();

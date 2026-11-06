@@ -95,6 +95,15 @@ const schemas = {
       history: arr(ref('HistoryEntry')),
       created_at: str({ format: 'date-time' }),
       updated_at: str({ format: 'date-time' }),
+      delivered_at: str({
+        format: 'date-time',
+        nullable: true,
+        description: 'Delivery event time; null until delivered.',
+      }),
+      delivered_at_estimated: {
+        type: 'boolean',
+        description: 'True only for legacy delivery dates inferred from updated_at.',
+      },
       items: arr(ref('OrderItem')),
     },
     ['id', 'user_id', 'status', 'total_cents', 'history', 'created_at', 'updated_at'],
@@ -150,7 +159,7 @@ const dates = ['from', 'to'].map((name) =>
   ),
 );
 const orderFilters = [...pagination, parameter('status', str({ enum: states })), ...dates];
-const reportFilters = [...dates, parameter('limit', { ...int(1, 100), default: 10 })];
+const reportFilters = [parameter('limit', { ...int(1, 100), default: 10 })];
 const paths = {};
 function route(
   method,
@@ -293,6 +302,18 @@ route('post', '/orders', 'Create an atomic multi-item order', {
   body: 'OrderInput',
   response: 'Order',
   status: 201,
+  parameters: [
+    {
+      name: 'Idempotency-Key',
+      in: 'header',
+      required: false,
+      schema: str({ pattern: '^[A-Za-z0-9._-]{1,128}$' }),
+      description:
+        'Optional, case-sensitive, scoped to the authenticated user and retained with the order. Reuse for retries of the same items (item order and UUID case are ignored). Different payload returns 409 IDEMPOTENCY_CONFLICT. Failed transactions do not consume the key.',
+    },
+  ],
+  description:
+    'Both creation and replay return 201 and the same order ID. Replay returns the current order representation, not cached bytes; no stock changes. Without a key, retries create independent orders.',
 });
 route('get', '/orders', 'List own orders (all for admin)', {
   response: 'Orders',
@@ -327,9 +348,15 @@ for (const [path, model] of [
             parameter('threshold', { ...int(0, 1000000), default: 10 }),
             parameter('limit', { ...int(1, 100), default: 10 }),
           ]
-        : reportFilters,
+        : [
+            ...dates.map((p) => ({
+              ...p,
+              description: `${p.name === 'from' ? 'Inclusive' : 'Exclusive'} ${path === 'order-counts' ? 'order creation time' : path === 'customer-history' ? 'delivery time for revenue; creation time for order count and last order' : 'delivery time'}, with timezone`,
+            })),
+            ...reportFilters,
+          ],
     description:
-      'Revenue/units include DELIVERED orders only; time ranges use order creation. Low-stock is a current snapshot.',
+      'Revenue/units use DELIVERED orders and delivered_at (UTC months). Order counts use created_at. Customer history revenue uses delivered_at; order_count/last_order_at use created_at. Low-stock is a current snapshot.',
   });
 route('get', '/reports/customers/{id}/orders', 'Customer purchase history (admin)', {
   response: arr(ref('CustomerOrder')),

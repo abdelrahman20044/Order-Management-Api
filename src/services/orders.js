@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { transaction } from '../db.js';
 import { AppError, requireFound } from '../errors.js';
 import { get, authorize } from '../repositories/orders.js';
@@ -8,10 +9,37 @@ export const transitions = {
   DELIVERED: [],
   CANCELLED: [],
 };
-export async function create(items, user) {
+export async function create(items, user, idempotencyKey) {
   return transaction(async (db) => {
+    const sorted = items
+      .map((i) => ({ product_id: i.product_id.toLowerCase(), quantity: i.quantity }))
+      .sort((a, b) => a.product_id.localeCompare(b.product_id));
+    const requestHash = idempotencyKey
+      ? createHash('sha256').update(JSON.stringify(sorted)).digest('hex')
+      : null;
+    if (idempotencyKey) {
+      // Transaction-scoped and database-wide: retries serialize across API processes.
+      // Hash collisions only cause extra waiting; identity still uses exact user/key SQL.
+      await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
+        `${user.id}:${idempotencyKey}`,
+      ]);
+      const previous = (
+        await db.query(
+          'SELECT id,request_hash FROM orders WHERE user_id=$1 AND idempotency_key=$2',
+          [user.id, idempotencyKey],
+        )
+      ).rows[0];
+      if (previous) {
+        if (previous.request_hash !== requestHash)
+          throw new AppError(
+            409,
+            'Idempotency key was used for a different order',
+            'IDEMPOTENCY_CONFLICT',
+          );
+        return get(previous.id, user, db);
+      }
+    }
     // Every stock-writing workflow locks products in ascending UUID order.
-    const sorted = [...items].sort((a, b) => a.product_id.localeCompare(b.product_id));
     const products = (
       await db.query(
         'SELECT p.*,c.active AS category_active FROM products p JOIN categories c ON c.id=p.category_id WHERE p.id=ANY($1::uuid[]) ORDER BY p.id FOR UPDATE OF p',
@@ -29,8 +57,8 @@ export async function create(items, user) {
     }
     const order = (
       await db.query(
-        "INSERT INTO orders(user_id,total_cents,history) VALUES($1::uuid,$2,jsonb_build_array(jsonb_build_object('status','PENDING','at',now(),'actor_id',($1::uuid)::text))) RETURNING *",
-        [user.id, total],
+        "INSERT INTO orders(user_id,total_cents,idempotency_key,request_hash,history) VALUES($1::uuid,$2,$3,$4,jsonb_build_array(jsonb_build_object('status','PENDING','at',now(),'actor_id',($1::uuid)::text))) RETURNING *",
+        [user.id, total, idempotencyKey ?? null, requestHash],
       )
     ).rows[0];
     for (const item of sorted) {
@@ -84,7 +112,7 @@ export async function changeStatus(id, next, user) {
       }
     }
     await db.query(
-      "UPDATE orders SET status=$1,updated_at=now(),history=history||jsonb_build_array(jsonb_build_object('status',$1::text,'at',now(),'actor_id',$3::text)) WHERE id=$2",
+      "UPDATE orders SET status=$1,updated_at=now(),delivered_at=CASE WHEN $1='DELIVERED' THEN statement_timestamp() ELSE delivered_at END,history=history||jsonb_build_array(jsonb_build_object('status',$1::text,'at',now(),'actor_id',$3::text)) WHERE id=$2",
       [next, id, user.id],
     );
     return get(id, user, db);
