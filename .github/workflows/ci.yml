@@ -1,0 +1,40 @@
+name: API CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_USER: orders
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: orders_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U orders -d orders_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://orders:ci-only-password@localhost:5432/orders_test
+      JWT_SECRET: ci-only-jwt-secret-with-at-least-32-characters
+      LOG_LEVEL: silent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run migrate
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run docs:check
+      - run: npm run test:coverage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage/
